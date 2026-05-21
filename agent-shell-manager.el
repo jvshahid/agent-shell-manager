@@ -73,6 +73,14 @@ taken as a fraction of the selected frame's width."
   :type 'string
   :group 'agent-shell-manager)
 
+(defcustom agent-shell-manager-poll-interval 0.5
+  "Seconds between background refreshes of the sidebar.
+The poll runs only while the sidebar is visible.  Set to nil to disable
+polling and rely solely on heartbeat advice."
+  :type '(choice (number :tag "Seconds")
+                 (const :tag "Disabled" nil))
+  :group 'agent-shell-manager)
+
 ;;;; Abstraction layer over agent-shell
 ;;
 ;; All access to `agent-shell' internals goes through these functions.  Tests
@@ -231,17 +239,75 @@ the end, and surviving entries keep their position."
     buf))
 
 (defun agent-shell-manager-refresh ()
-  "Refresh the sidebar list."
+  "Refresh the sidebar list, preserving the visible cursor row.
+The saved row is read from the sidebar window's `window-point' (not the
+buffer's point, which drifts when the sidebar isn't the selected
+window).  After repainting we re-sync `window-point' because
+`tabulated-list-print' erases the buffer, which invalidates window-point
+and would otherwise snap the visible cursor to the top of the sidebar."
   (interactive)
   (when-let ((buf (get-buffer agent-shell-manager--buffer-name)))
     (with-current-buffer buf
-      (let ((saved (tabulated-list-get-id)))
+      (let* ((win (get-buffer-window buf t))
+             (saved (save-excursion
+                      (when win (goto-char (window-point win)))
+                      (tabulated-list-get-id))))
         (tabulated-list-print t)
         (when saved
           (goto-char (point-min))
           (while (and (not (eobp))
                       (not (eq (tabulated-list-get-id) saved)))
-            (forward-line 1)))))))
+            (forward-line 1))
+          (when (eobp)
+            (goto-char (point-min))))
+        (when win
+          (set-window-point win (point)))))))
+
+;;;; Background polling
+;;
+;; The sidebar is repainted by a low-rate poll that runs only while the
+;; sidebar is visible.  Polling tolerates any source of state change
+;; (`agent-shell''s heartbeat, `shell-maker--busy', etc.) and avoids the
+;; redisplay quirks of refreshing from inside process-filter callbacks.
+
+(defvar agent-shell-manager--poll-timer nil
+  "Repeating timer that refreshes the sidebar, or nil.")
+
+(defvar agent-shell-manager--last-signature nil
+  "Cached signature of the last rendered entries; cheap change-detector.")
+
+(defun agent-shell-manager--signature ()
+  "Return a value that changes when any visible session attribute changes."
+  (mapcar (lambda (buf)
+            (cons (buffer-name buf)
+                  (and (buffer-live-p buf)
+                       (agent-shell-manager--session-busy-p buf))))
+          (agent-shell-manager--ordered-buffers)))
+
+(defun agent-shell-manager--poll-tick ()
+  "Refresh the sidebar if any session's display-relevant state changed."
+  (if (not (get-buffer-window agent-shell-manager--buffer-name t))
+      (agent-shell-manager--stop-polling)
+    (let ((sig (agent-shell-manager--signature)))
+      (unless (equal sig agent-shell-manager--last-signature)
+        (setq agent-shell-manager--last-signature sig)
+        (agent-shell-manager-refresh)))))
+
+(defun agent-shell-manager--start-polling ()
+  "Start the background poll timer if not already running."
+  (when (and agent-shell-manager-poll-interval
+             (not (timerp agent-shell-manager--poll-timer)))
+    (setq agent-shell-manager--last-signature nil)
+    (setq agent-shell-manager--poll-timer
+          (run-with-timer agent-shell-manager-poll-interval
+                          agent-shell-manager-poll-interval
+                          #'agent-shell-manager--poll-tick))))
+
+(defun agent-shell-manager--stop-polling ()
+  "Cancel the background poll timer, if any."
+  (when (timerp agent-shell-manager--poll-timer)
+    (cancel-timer agent-shell-manager--poll-timer))
+  (setq agent-shell-manager--poll-timer nil))
 
 (defun agent-shell-manager--point-to-session (buffer)
   "Move point in the sidebar to the row whose id is BUFFER.
@@ -288,11 +354,13 @@ If there is an active session, point lands on its row."
                (buffer-live-p agent-shell-manager--active-session))
       (agent-shell-manager--point-to-session
        agent-shell-manager--active-session))
+    (agent-shell-manager--start-polling)
     (when win (select-window win))))
 
 (defun agent-shell-manager-hide ()
   "Hide the agent sessions sidebar."
   (interactive)
+  (agent-shell-manager--stop-polling)
   (when-let ((win (agent-shell-manager--sidebar-window)))
     (delete-window win)))
 
@@ -433,22 +501,6 @@ shown."
 
 (add-hook 'agent-shell-mode-hook
           #'agent-shell-manager--maybe-install-buffer-hooks)
-
-;;;; Heartbeat advice
-;;
-;; `agent-shell-heartbeat-start' / `-stop' flip the per-session :status field
-;; that `--session-busy-p' reads.  Advise both with :after to refresh the
-;; sidebar at the exact moment the state transitions.
-
-(defun agent-shell-manager--on-heartbeat-change (&rest _)
-  "Refresh the sidebar after a heartbeat status transition."
-  (agent-shell-manager-refresh))
-
-(with-eval-after-load 'agent-shell-heartbeat
-  (advice-add 'agent-shell-heartbeat-start :after
-              #'agent-shell-manager--on-heartbeat-change)
-  (advice-add 'agent-shell-heartbeat-stop :after
-              #'agent-shell-manager--on-heartbeat-change))
 
 (provide 'agent-shell-manager)
 

@@ -42,14 +42,6 @@
           (should-not (agent-shell-manager--session-busy-p buf)))
       (kill-buffer buf))))
 
-(ert-deftest agent-shell-manager-test/on-heartbeat-change-refreshes ()
-  (let ((called 0))
-    (cl-letf (((symbol-function 'agent-shell-manager-refresh)
-               (lambda () (cl-incf called))))
-      (agent-shell-manager--on-heartbeat-change)
-      (agent-shell-manager--on-heartbeat-change :heartbeat 'foo)
-      (should (= called 2)))))
-
 (ert-deftest agent-shell-manager-test/session-busy-p-falls-back-to-shell-maker-busy ()
   (let ((buf (generate-new-buffer "*s*")))
     (unwind-protect
@@ -300,6 +292,35 @@
                 (should (eq (tabulated-list-get-id) s1))
                 (forward-line 1)
                 (should (eq (tabulated-list-get-id) s2))))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/refresh-preserves-window-point-when-sidebar-unselected ()
+  ;; Regression: when the sidebar is shown in an unselected window, refresh
+  ;; must read the saved row from window-point (not buffer point) and re-sync
+  ;; window-point after `tabulated-list-print' erases the buffer.
+  (agent-shell-manager-test--reset-state)
+  (let ((s1 (agent-shell-manager-test--make-mock-session "*a*" "/tmp/"))
+        (s2 (agent-shell-manager-test--make-mock-session "*b*" "/tmp/"))
+        (s3 (agent-shell-manager-test--make-mock-session "*c*" "/tmp/")))
+    (agent-shell-manager-test--with-mock-sessions (list s1 s2 s3)
+      (let* ((buf (agent-shell-manager--get-or-create-buffer))
+             (win (display-buffer-in-side-window
+                   buf '((side . left) (slot . 0)))))
+        (unwind-protect
+            (progn
+              (with-current-buffer buf
+                (tabulated-list-print t)
+                ;; Place window-point on s2; force buffer point elsewhere
+                ;; so the two diverge (mirroring the unselected-window case).
+                (goto-char (point-min))
+                (forward-line 1)
+                (set-window-point win (point))
+                (goto-char (point-min)))
+              (agent-shell-manager-refresh)
+              (with-selected-window win
+                (should (eq (tabulated-list-get-id) s2))))
+          (when (window-live-p win) (delete-window win))
           (let ((kill-buffer-query-functions nil))
             (kill-buffer buf)))))))
 
