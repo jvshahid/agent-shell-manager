@@ -88,6 +88,8 @@ Inside the sidebar:
 | `RET` | activate and focus the agent buffer                |
 | `c`   | create a new session, prompts for a directory      |
 | `C`   | create a new session and prompt for the provider   |
+| `r`   | restart at point, resuming the same conversation   |
+| `R`   | restart at point, prompting for new or existing    |
 | `k`   | kill the session at point and its paired eshell    |
 | `g`   | refresh                                            |
 | `q`   | hide the sidebar                                   |

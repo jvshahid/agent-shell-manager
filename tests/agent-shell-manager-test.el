@@ -590,6 +590,314 @@
     (should-error (agent-shell-manager-new-session "/tmp/")
                   :type 'user-error)))
 
+;;;; Restart
+
+(defmacro agent-shell-manager-test--with-restart-sessions (sessions bindings &rest body)
+  "Run BODY with SESSIONS mocked and `--start-shell' stubbed.
+
+BINDINGS is a plist supporting:
+  :captured-args  a symbol bound to a list that collects the keyword
+                  args passed to `--start-shell'.
+  :new-buffer-fn  a function returning the buffer to install as the
+                  newly-created session.  Called with no arguments
+                  from inside the stubbed `--start-shell'.  The
+                  returned buffer is appended to the mock session
+                  list so the diff used by the restart helper picks
+                  it up.
+
+`yes-or-no-p' is stubbed to auto-confirm so the body does not block
+on the restart confirmation prompt.  Tests exercising the prompt
+itself should override the stub locally."
+  (declare (indent 2) (debug t))
+  (let ((captured (plist-get bindings :captured-args))
+        (new-fn (plist-get bindings :new-buffer-fn)))
+    `(agent-shell-manager-test--with-mock-sessions ,sessions
+       (cl-letf (((symbol-function 'agent-shell-manager--start-shell)
+                  (lambda (&rest args)
+                    ,(when captured `(setq ,captured args))
+                    (let ((new (funcall ,new-fn)))
+                      (push new agent-shell-manager-test--mock-sessions)
+                      new)))
+                 ((symbol-function 'agent-shell-manager--session-config)
+                  (lambda (buf)
+                    (buffer-local-value 'agent-shell-manager-test--config buf)))
+                 ((symbol-function 'agent-shell-manager--session-id)
+                  (lambda (buf)
+                    (buffer-local-value 'agent-shell-manager-test--session-id buf)))
+                 ((symbol-function 'yes-or-no-p)
+                  (lambda (&rest _) t)))
+         ,@body))))
+
+(defun agent-shell-manager-test--make-restartable-session
+    (name cwd &optional config session-id)
+  "Like `--make-mock-session' but also sets stub config/session-id."
+  (let ((buf (agent-shell-manager-test--make-mock-session name cwd)))
+    (with-current-buffer buf
+      (setq-local agent-shell-manager-test--config (or config 'mock-config))
+      (setq-local agent-shell-manager-test--session-id session-id))
+    buf))
+
+(ert-deftest agent-shell-manager-test/restart-preserves-position ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a "id-a"))
+         (s2 (agent-shell-manager-test--make-restartable-session
+              "*b*" "/tmp/" 'cfg-b "id-b"))
+         (s3 (agent-shell-manager-test--make-restartable-session
+              "*c*" "/tmp/" 'cfg-c "id-c"))
+         (captured nil))
+    (agent-shell-manager-test--with-restart-sessions (list s1 s2 s3)
+        (:captured-args captured
+         :new-buffer-fn (lambda ()
+                          (agent-shell-manager-test--make-restartable-session
+                           "*b-new*" "/tmp/" 'cfg-b "id-b")))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (forward-line 1) ;; on s2
+              (agent-shell-manager-restart-session)
+              (should-not (buffer-live-p s2))
+              ;; The middle slot should still be the restarted session.
+              (should (= 3 (length agent-shell-manager--display-order)))
+              (should (eq s1 (nth 0 agent-shell-manager--display-order)))
+              (should (eq s3 (nth 2 agent-shell-manager--display-order)))
+              (let ((new (nth 1 agent-shell-manager--display-order)))
+                (should (buffer-live-p new))
+                (should-not (eq new s2))))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-passes-same-config-and-session-id ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-claude "sess-42"))
+         (captured nil))
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args captured
+         :new-buffer-fn (lambda ()
+                          (agent-shell-manager-test--make-restartable-session
+                           "*a-new*" "/tmp/" 'cfg-claude "sess-42")))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (agent-shell-manager-restart-session)
+              (should (eq (plist-get captured :config) 'cfg-claude))
+              (should (equal (plist-get captured :session-id) "sess-42"))
+              (should (null (plist-get captured :session-strategy))))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-pick-uses-prompt-strategy ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-claude "sess-42"))
+         (captured nil))
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args captured
+         :new-buffer-fn (lambda ()
+                          (agent-shell-manager-test--make-restartable-session
+                           "*a-new*" "/tmp/" 'cfg-claude nil)))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (agent-shell-manager-restart-session-pick)
+              (should (eq (plist-get captured :config) 'cfg-claude))
+              (should (null (plist-get captured :session-id)))
+              (should (eq (plist-get captured :session-strategy) 'prompt)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-preserves-eshell-pairing ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a "id-a"))
+         (eshell-buf (agent-shell-manager--eshell-for s1)))
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args _
+         :new-buffer-fn (lambda ()
+                          (agent-shell-manager-test--make-restartable-session
+                           "*a-new*" "/tmp/" 'cfg-a "id-a")))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (agent-shell-manager-restart-session)
+              (let ((new (car agent-shell-manager--display-order)))
+                (should (buffer-live-p eshell-buf))
+                (should (eq eshell-buf
+                            (gethash new agent-shell-manager--eshell-by-agent)))
+                (should-not (gethash s1 agent-shell-manager--eshell-by-agent))))
+          (agent-shell-manager--forget-eshell
+           (car agent-shell-manager--display-order))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-preserves-active-pointer ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a "id-a"))
+         (s2 (agent-shell-manager-test--make-restartable-session
+              "*b*" "/tmp/" 'cfg-b "id-b")))
+    (agent-shell-manager-test--with-restart-sessions (list s1 s2)
+        (:captured-args _
+         :new-buffer-fn (lambda ()
+                          (agent-shell-manager-test--make-restartable-session
+                           "*a-new*" "/tmp/" 'cfg-a "id-a")))
+      (let ((buf (agent-shell-manager--get-or-create-buffer))
+            (agent-shell-manager--active-session s1))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min)) ;; on s1
+              (agent-shell-manager-restart-session)
+              (should (eq agent-shell-manager--active-session
+                          (car agent-shell-manager--display-order))))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-errors-without-session-id ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a nil)))
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args _
+         :new-buffer-fn (lambda () (error "should not be called")))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (should-error (agent-shell-manager-restart-session)
+                            :type 'user-error)
+              ;; The original session must still be alive when the
+              ;; precondition fails.
+              (should (buffer-live-p s1)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-confirms-before-killing ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a "id-a"))
+         (prompts nil))
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args _
+         :new-buffer-fn (lambda ()
+                          (agent-shell-manager-test--make-restartable-session
+                           "*a-new*" "/tmp/" 'cfg-a "id-a")))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (cl-letf (((symbol-function 'yes-or-no-p)
+                         (lambda (msg) (push msg prompts) t)))
+                (agent-shell-manager-restart-session))
+              (should (= 1 (length prompts)))
+              (should (string-match-p "resume" (car prompts)))
+              (should-not (buffer-live-p s1)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-pick-prompt-mentions-pick ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a "id-a"))
+         (prompts nil))
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args _
+         :new-buffer-fn (lambda ()
+                          (agent-shell-manager-test--make-restartable-session
+                           "*a-new*" "/tmp/" 'cfg-a nil)))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (cl-letf (((symbol-function 'yes-or-no-p)
+                         (lambda (msg) (push msg prompts) t)))
+                (agent-shell-manager-restart-session-pick))
+              (should (= 1 (length prompts)))
+              (should (string-match-p "pick" (car prompts))))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-aborts-when-declined ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a "id-a"))
+         (start-called nil))
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args _
+         :new-buffer-fn (lambda ()
+                          (setq start-called t)
+                          (agent-shell-manager-test--make-restartable-session
+                           "*a-new*" "/tmp/" 'cfg-a "id-a")))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (cl-letf (((symbol-function 'yes-or-no-p)
+                         (lambda (&rest _) nil)))
+                (should-error (agent-shell-manager-restart-session)
+                              :type 'user-error))
+              (should-not start-called)
+              (should (buffer-live-p s1)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-no-confirm-when-disabled ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a "id-a"))
+         (agent-shell-manager-confirm-kill nil)
+         (prompted nil))
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args _
+         :new-buffer-fn (lambda ()
+                          (agent-shell-manager-test--make-restartable-session
+                           "*a-new*" "/tmp/" 'cfg-a "id-a")))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (cl-letf (((symbol-function 'yes-or-no-p)
+                         (lambda (&rest _) (setq prompted t) t)))
+                (agent-shell-manager-restart-session))
+              (should-not prompted)
+              (should-not (buffer-live-p s1)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-errors-without-config ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a "id-a")))
+    (with-current-buffer s1
+      (setq-local agent-shell-manager-test--config nil))
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args _
+         :new-buffer-fn (lambda () (error "should not be called")))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (should-error (agent-shell-manager-restart-session)
+                            :type 'user-error)
+              (should (buffer-live-p s1)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
 (ert-deftest agent-shell-manager-test/current-session-errors-on-empty ()
   (agent-shell-manager-test--with-mock-sessions nil
     (let ((buf (agent-shell-manager--get-or-create-buffer)))

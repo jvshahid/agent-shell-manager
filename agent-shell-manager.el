@@ -117,6 +117,32 @@ first tick promotes it to `busy', so we treat both as in-flight."
   "Return the working directory for BUFFER's session."
   (with-current-buffer buffer default-directory))
 
+(defun agent-shell-manager--session-config (buffer)
+  "Return the agent configuration alist for BUFFER's session, or nil."
+  (with-current-buffer buffer
+    (and (boundp 'agent-shell--state)
+         (map-elt agent-shell--state :agent-config))))
+
+(defun agent-shell-manager--session-id (buffer)
+  "Return the ACP session id string for BUFFER, or nil."
+  (with-current-buffer buffer
+    (and (boundp 'agent-shell--state)
+         (map-nested-elt agent-shell--state '(:session :id)))))
+
+(cl-defun agent-shell-manager--start-shell (&key config session-id session-strategy)
+  "Start a new agent-shell session and return its buffer.
+CONFIG is the agent configuration alist.  SESSION-ID, if non-nil,
+resumes that ACP session.  SESSION-STRATEGY, if non-nil, overrides
+the buffer-local `agent-shell-session-strategy' on the new shell."
+  (unless (fboundp 'agent-shell--start)
+    (user-error "agent-shell is not loaded"))
+  (funcall 'agent-shell--start
+           :config config
+           :session-id session-id
+           :session-strategy session-strategy
+           :new-session t
+           :no-focus t))
+
 ;;;; Eshell pairing
 ;;
 ;; A hash table maps agent buffer -> paired eshell buffer.  Entries are
@@ -464,6 +490,83 @@ shown."
    (list (read-directory-name "New agent session in: " default-directory nil t)))
   (agent-shell-manager-new-session directory :force-select-config t))
 
+(cl-defun agent-shell-manager--restart-at-point (&key resume session-strategy)
+  "Restart the agent at point with the same agent config.
+When RESUME is non-nil, pass the current ACP session id so the new
+shell continues the same conversation.  When SESSION-STRATEGY is
+non-nil, override the new shell's `agent-shell-session-strategy'.
+
+The new buffer is spliced into the sidebar at the position the old
+buffer occupied, and the paired eshell (if any) is carried over so
+scrollback and working directory survive the restart."
+  (let* ((old-agent (agent-shell-manager--current-session))
+         (config (agent-shell-manager--session-config old-agent))
+         (session-id (and resume (agent-shell-manager--session-id old-agent)))
+         (directory (agent-shell-manager--session-cwd old-agent))
+         (index (cl-position old-agent agent-shell-manager--display-order))
+         (eshell-buf (gethash old-agent agent-shell-manager--eshell-by-agent))
+         (was-active (eq old-agent agent-shell-manager--active-session))
+         (name (agent-shell-manager--session-name old-agent))
+         (prompt (if resume
+                     (format "Restart agent session %s (resume conversation)? " name)
+                   (format "Restart agent session %s (pick new or existing)? " name))))
+    (unless config
+      (user-error "Cannot determine agent config for this session"))
+    (when (and resume (not session-id))
+      (user-error "No session id available to resume"))
+    (when (and agent-shell-manager-confirm-kill
+               (not (yes-or-no-p prompt)))
+      (user-error "Cancelled"))
+    ;; Detach the paired eshell so the agent buffer's kill-buffer-hook
+    ;; (which would otherwise kill it) leaves it alone.  We re-attach
+    ;; once the replacement buffer exists.
+    (when eshell-buf
+      (remhash old-agent agent-shell-manager--eshell-by-agent))
+    (let ((kill-buffer-query-functions nil))
+      (kill-buffer old-agent))
+    (let* ((before (agent-shell-manager--session-buffers))
+           (default-directory (expand-file-name directory))
+           (_ (save-window-excursion
+                (agent-shell-manager--start-shell
+                 :config config
+                 :session-id session-id
+                 :session-strategy session-strategy)))
+           (new-buf (car (cl-set-difference
+                          (agent-shell-manager--session-buffers)
+                          before))))
+      (when (and new-buf (buffer-live-p new-buf))
+        (when (and eshell-buf (buffer-live-p eshell-buf))
+          (puthash new-buf eshell-buf agent-shell-manager--eshell-by-agent))
+        (when index
+          (setq agent-shell-manager--display-order
+                (cl-remove new-buf agent-shell-manager--display-order))
+          (let* ((order agent-shell-manager--display-order)
+                 (pos (min index (length order))))
+            (setq agent-shell-manager--display-order
+                  (append (cl-subseq order 0 pos)
+                          (list new-buf)
+                          (cl-subseq order pos)))))
+        (when was-active
+          (setq agent-shell-manager--active-session new-buf))
+        (agent-shell-manager-refresh)
+        (agent-shell-manager--point-to-session new-buf))
+      new-buf)))
+
+(defun agent-shell-manager-restart-session ()
+  "Restart the agent at point, resuming the same conversation.
+Uses the same agent configuration and ACP session id as the existing
+session, so the model and chat history are preserved."
+  (interactive)
+  (agent-shell-manager--restart-at-point :resume t))
+
+(defun agent-shell-manager-restart-session-pick ()
+  "Restart the agent at point, prompting for new or existing conversation.
+Uses the same agent configuration but lets the agent prompt for
+whether to start a fresh conversation or resume one of its existing
+sessions."
+  (interactive)
+  (agent-shell-manager--restart-at-point :session-strategy 'prompt))
+
 (defun agent-shell-manager-kill-session ()
   "Kill the agent buffer at point and its paired eshell."
   (interactive)
@@ -486,6 +589,8 @@ shown."
   (define-key map (kbd "RET") #'agent-shell-manager-visit)
   (define-key map (kbd "c") #'agent-shell-manager-new-session)
   (define-key map (kbd "C") #'agent-shell-manager-new-session-pick-config)
+  (define-key map (kbd "r") #'agent-shell-manager-restart-session)
+  (define-key map (kbd "R") #'agent-shell-manager-restart-session-pick)
   (define-key map (kbd "k") #'agent-shell-manager-kill-session)
   (define-key map (kbd "g") #'agent-shell-manager-refresh)
   (define-key map (kbd "q") #'agent-shell-manager-hide))
