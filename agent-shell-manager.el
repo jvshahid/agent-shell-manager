@@ -83,10 +83,9 @@ polling and rely solely on heartbeat advice."
 
 (defface agent-shell-manager-unseen-idle
   '((t :underline t))
-  "Face for session names whose agent finished while not displayed.
-Applied when a session transitions from busy to idle and the user has
-not yet viewed its buffer; cleared once the buffer becomes visible
-again."
+  "Face for session names whose agent finished without being focused.
+Applied when a session transitions from busy to idle while the user is
+not focused on its buffer; cleared once the user selects the buffer."
   :group 'agent-shell-manager)
 
 ;;;; Abstraction layer over agent-shell
@@ -171,10 +170,11 @@ Insulates the UI from reorderings of `agent-shell-buffers' (which
 shuffles by recent access).  New sessions append; dead sessions drop.")
 
 (defvar agent-shell-manager--unseen-idle (make-hash-table :test 'eq)
-  "Set of agent buffers that went idle while not visible.
+  "Set of agent buffers that went idle without the user focusing them.
 A buffer is added when the poll observes a busy→idle transition while
-the buffer is not displayed, and removed when the buffer becomes
-visible again (or is activated through the manager).")
+the buffer is not the selected window, and removed once the user
+selects the buffer (focuses its window) or activates it with focus
+through the manager.")
 
 (defvar agent-shell-manager--last-busy (make-hash-table :test 'eq)
   "Last observed busy state per agent buffer.
@@ -335,26 +335,37 @@ and would otherwise snap the visible cursor to the top of the sidebar."
                   (gethash buf agent-shell-manager--unseen-idle)))
           (agent-shell-manager--ordered-buffers)))
 
-(defun agent-shell-manager--buffer-visible-p (buffer)
-  "Return non-nil if BUFFER is shown in any visible frame."
+(defun agent-shell-manager--buffer-selected-p (buffer)
+  "Return non-nil if BUFFER is the buffer of the currently selected window."
   (and (buffer-live-p buffer)
-       (get-buffer-window buffer 'visible)))
+       (eq (window-buffer (selected-window)) buffer)))
 
 (defun agent-shell-manager--update-unseen-state ()
-  "Track busy→idle transitions and maintain `--unseen-idle'.
-A session that goes from busy to idle while not displayed in any
-visible window is added to the unseen set.  Any session currently
-displayed has its flag cleared, so the marker disappears as soon as
-the user looks at the buffer."
+  "Track busy/idle transitions and react to them.
+A busy→idle transition that happens without the agent buffer being
+the selected window adds the buffer to `--unseen-idle'.  The flag
+clears once the user actually selects the buffer, not merely when it
+becomes visible.
+
+On the opposite transition (idle→busy) — i.e. the user just sent a
+prompt — focus is bounced from the agent buffer back to the sidebar.
+Otherwise the user would stay \"selected\" on the agent indefinitely
+and the marker would never fire when the response arrives."
   (let ((live (agent-shell-manager--session-buffers))
         stale)
     (dolist (buf live)
-      (let ((was-busy (gethash buf agent-shell-manager--last-busy))
-            (busy (agent-shell-manager--session-busy-p buf))
-            (visible (agent-shell-manager--buffer-visible-p buf)))
-        (when (and was-busy (not busy) (not visible))
+      (let* ((prior (gethash buf agent-shell-manager--last-busy 'unset))
+             (had-prior (not (eq prior 'unset)))
+             (was-busy (and had-prior prior))
+             (busy (agent-shell-manager--session-busy-p buf))
+             (selected (agent-shell-manager--buffer-selected-p buf)))
+        (when (and was-busy (not busy) (not selected))
           (puthash buf t agent-shell-manager--unseen-idle))
-        (when visible
+        (when (and had-prior (not was-busy) busy selected)
+          (when-let ((sidebar-win (agent-shell-manager--sidebar-window)))
+            (unless (eq sidebar-win (selected-window))
+              (select-window sidebar-win))))
+        (when selected
           (remhash buf agent-shell-manager--unseen-idle))
         (puthash buf busy agent-shell-manager--last-busy)))
     (maphash (lambda (buf _) (unless (memq buf live) (push buf stale)))
@@ -471,7 +482,6 @@ otherwise keep focus in the sidebar."
     (unless sidebar-win
       (user-error "Sidebar is not visible"))
     (setq agent-shell-manager--active-session agent-buffer)
-    (remhash agent-buffer agent-shell-manager--unseen-idle)
     (agent-shell-manager-refresh)
     (agent-shell-manager--point-to-session agent-buffer)
     ;; Collapse everything except the sidebar, then split the main area.
@@ -481,9 +491,14 @@ otherwise keep focus in the sidebar."
       (set-window-buffer main-win agent-buffer)
       (let ((bottom (split-window main-win nil 'below)))
         (set-window-buffer bottom eshell-buf))
-      (if focus-agent
-          (select-window main-win)
-        (select-window sidebar-win)))))
+      (cond (focus-agent
+             (select-window main-win)
+             ;; Focusing the agent counts as the user interacting with it;
+             ;; drop the unseen marker immediately rather than waiting for
+             ;; the next poll tick.
+             (remhash agent-buffer agent-shell-manager--unseen-idle))
+            (t
+             (select-window sidebar-win))))))
 
 ;;;; Commands bound in the sidebar
 
@@ -605,8 +620,7 @@ scrollback and working directory survive the restart."
                           (list new-buf)
                           (cl-subseq order pos)))))
         (when was-active
-          (setq agent-shell-manager--active-session new-buf)
-          (remhash new-buf agent-shell-manager--unseen-idle))
+          (setq agent-shell-manager--active-session new-buf))
         ;; Put the new buffer back into every window the old buffer was
         ;; displayed in, so the "active" arrow in the sidebar matches what
         ;; the user actually sees in the layout.
