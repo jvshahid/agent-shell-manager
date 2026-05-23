@@ -561,6 +561,9 @@ scrollback and working directory survive the restart."
          (index (cl-position old-agent agent-shell-manager--display-order))
          (eshell-buf (gethash old-agent agent-shell-manager--eshell-by-agent))
          (was-active (eq old-agent agent-shell-manager--active-session))
+         ;; Snapshot windows showing the old buffer before kill-buffer
+         ;; evicts it and Emacs substitutes some unrelated replacement.
+         (old-windows (get-buffer-window-list old-agent nil t))
          (name (agent-shell-manager--session-name old-agent))
          (prompt (if resume
                      (format "Restart agent session %s (resume conversation)? " name)
@@ -602,7 +605,14 @@ scrollback and working directory survive the restart."
                           (list new-buf)
                           (cl-subseq order pos)))))
         (when was-active
-          (setq agent-shell-manager--active-session new-buf))
+          (setq agent-shell-manager--active-session new-buf)
+          (remhash new-buf agent-shell-manager--unseen-idle))
+        ;; Put the new buffer back into every window the old buffer was
+        ;; displayed in, so the "active" arrow in the sidebar matches what
+        ;; the user actually sees in the layout.
+        (dolist (win old-windows)
+          (when (window-live-p win)
+            (set-window-buffer win new-buf)))
         (agent-shell-manager-refresh)
         (agent-shell-manager--point-to-session new-buf))
       new-buf)))

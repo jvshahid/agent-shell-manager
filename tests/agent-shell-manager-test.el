@@ -863,6 +863,40 @@ itself should override the stub locally."
           (let ((kill-buffer-query-functions nil))
             (kill-buffer buf)))))))
 
+(ert-deftest agent-shell-manager-test/restart-replaces-displayed-buffer ()
+  ;; Regression: killing the old buffer evicts it from any window, so the
+  ;; layout's main window ends up showing some unrelated replacement.  The
+  ;; restart must put the new buffer back into those windows so the sidebar
+  ;; "active" arrow matches what the user actually sees.
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a "id-a")))
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args _
+         :new-buffer-fn (lambda ()
+                          (agent-shell-manager-test--make-restartable-session
+                           "*a-new*" "/tmp/" 'cfg-a "id-a")))
+      (let* ((buf (agent-shell-manager--get-or-create-buffer))
+             (saved-config (current-window-configuration))
+             (main-win (selected-window)))
+        (unwind-protect
+            (progn
+              (set-window-buffer main-win s1)
+              (with-current-buffer buf
+                (tabulated-list-print t)
+                (goto-char (point-min)))
+              (setq agent-shell-manager--active-session s1)
+              (with-current-buffer buf
+                (goto-char (point-min))
+                (agent-shell-manager-restart-session))
+              (let ((new-buf (car agent-shell-manager--display-order)))
+                (should (buffer-live-p new-buf))
+                (should (window-live-p main-win))
+                (should (eq (window-buffer main-win) new-buf))))
+          (set-window-configuration saved-config)
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
 (ert-deftest agent-shell-manager-test/restart-errors-without-session-id ()
   (agent-shell-manager-test--reset-state)
   (let* ((s1 (agent-shell-manager-test--make-restartable-session
