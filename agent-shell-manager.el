@@ -477,6 +477,16 @@ If there is an active session, point lands on its row."
           (select-window eshell-win)
         (user-error "Eshell window not visible")))))
 
+(defun agent-shell-manager-clear-unseen-marker ()
+  "Clear the unseen-idle indicator for the session at point.
+Unlike visiting the buffer, this does not switch focus."
+  (interactive)
+  (let ((agent-buf (agent-shell-manager--current-session)))
+    (unless agent-buf
+      (user-error "No agent session on this line"))
+    (remhash agent-buf agent-shell-manager--unseen-idle)
+    (agent-shell-manager-refresh)))
+
 ;;;; Layout activation
 
 (defun agent-shell-manager--current-session ()
@@ -687,6 +697,7 @@ sessions."
   (define-key map (kbd "k") #'agent-shell-manager-kill-session)
   (define-key map (kbd "g") #'agent-shell-manager-refresh)
   (define-key map (kbd "e") #'agent-shell-manager-switch-to-eshell)
+  (define-key map (kbd "u") #'agent-shell-manager-clear-unseen-marker)
   (define-key map (kbd "q") #'agent-shell-manager-hide))
 
 ;;;; Hooks into agent-shell lifecycle
