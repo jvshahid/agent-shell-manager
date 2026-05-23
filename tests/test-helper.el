@@ -47,6 +47,8 @@ exit."
 (defun agent-shell-manager-test--reset-state ()
   "Reset module state between tests."
   (clrhash agent-shell-manager--eshell-by-agent)
+  (clrhash agent-shell-manager--unseen-idle)
+  (clrhash agent-shell-manager--last-busy)
   (setq agent-shell-manager--display-order nil)
   (setq agent-shell-manager--active-session nil))
 

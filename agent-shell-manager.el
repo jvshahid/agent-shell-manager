@@ -81,6 +81,14 @@ polling and rely solely on heartbeat advice."
                  (const :tag "Disabled" nil))
   :group 'agent-shell-manager)
 
+(defface agent-shell-manager-unseen-idle
+  '((t :underline t))
+  "Face for session names whose agent finished while not displayed.
+Applied when a session transitions from busy to idle and the user has
+not yet viewed its buffer; cleared once the buffer becomes visible
+again."
+  :group 'agent-shell-manager)
+
 ;;;; Abstraction layer over agent-shell
 ;;
 ;; All access to `agent-shell' internals goes through these functions.  Tests
@@ -162,6 +170,17 @@ the buffer-local `agent-shell-session-strategy' on the new shell."
 Insulates the UI from reorderings of `agent-shell-buffers' (which
 shuffles by recent access).  New sessions append; dead sessions drop.")
 
+(defvar agent-shell-manager--unseen-idle (make-hash-table :test 'eq)
+  "Set of agent buffers that went idle while not visible.
+A buffer is added when the poll observes a busy→idle transition while
+the buffer is not displayed, and removed when the buffer becomes
+visible again (or is activated through the manager).")
+
+(defvar agent-shell-manager--last-busy (make-hash-table :test 'eq)
+  "Last observed busy state per agent buffer.
+Used by `agent-shell-manager--update-unseen-state' to detect busy→idle
+transitions across poll ticks.")
+
 (defun agent-shell-manager--eshell-buffer-name (agent-buffer)
   "Return the eshell buffer name paired with AGENT-BUFFER."
   (format "*eshell: %s*" (agent-shell-manager--session-name agent-buffer)))
@@ -200,6 +219,8 @@ shuffles by recent access).  New sessions append; dead sessions drop.")
 (defun agent-shell-manager--on-agent-buffer-killed ()
   "Hook installed on agent buffers; clean up paired eshell and refresh sidebar."
   (agent-shell-manager--forget-eshell (current-buffer))
+  (remhash (current-buffer) agent-shell-manager--unseen-idle)
+  (remhash (current-buffer) agent-shell-manager--last-busy)
   (when (get-buffer agent-shell-manager--buffer-name)
     (run-at-time 0 nil #'agent-shell-manager-refresh)))
 
@@ -208,13 +229,16 @@ shuffles by recent access).  New sessions append; dead sessions drop.")
 (defun agent-shell-manager--entry-for (buffer)
   "Build a `tabulated-list-entries' row for session BUFFER.
 The row id is BUFFER itself, so commands can recover it from point."
-  (let ((active (if (eq buffer agent-shell-manager--active-session)
-                    agent-shell-manager-active-indicator
-                  agent-shell-manager-inactive-indicator))
-        (busy (if (agent-shell-manager--session-busy-p buffer)
-                  agent-shell-manager-busy-indicator
-                agent-shell-manager-idle-indicator))
-        (name (agent-shell-manager--session-name buffer)))
+  (let* ((active (if (eq buffer agent-shell-manager--active-session)
+                     agent-shell-manager-active-indicator
+                   agent-shell-manager-inactive-indicator))
+         (busy (if (agent-shell-manager--session-busy-p buffer)
+                   agent-shell-manager-busy-indicator
+                 agent-shell-manager-idle-indicator))
+         (raw-name (agent-shell-manager--session-name buffer))
+         (name (if (gethash buffer agent-shell-manager--unseen-idle)
+                   (propertize raw-name 'face 'agent-shell-manager-unseen-idle)
+                 raw-name)))
     (list buffer (vector active busy name))))
 
 (defun agent-shell-manager--ordered-buffers ()
@@ -305,15 +329,45 @@ and would otherwise snap the visible cursor to the top of the sidebar."
 (defun agent-shell-manager--signature ()
   "Return a value that changes when any visible session attribute changes."
   (mapcar (lambda (buf)
-            (cons (buffer-name buf)
+            (list (buffer-name buf)
                   (and (buffer-live-p buf)
-                       (agent-shell-manager--session-busy-p buf))))
+                       (agent-shell-manager--session-busy-p buf))
+                  (gethash buf agent-shell-manager--unseen-idle)))
           (agent-shell-manager--ordered-buffers)))
+
+(defun agent-shell-manager--buffer-visible-p (buffer)
+  "Return non-nil if BUFFER is shown in any visible frame."
+  (and (buffer-live-p buffer)
+       (get-buffer-window buffer 'visible)))
+
+(defun agent-shell-manager--update-unseen-state ()
+  "Track busy→idle transitions and maintain `--unseen-idle'.
+A session that goes from busy to idle while not displayed in any
+visible window is added to the unseen set.  Any session currently
+displayed has its flag cleared, so the marker disappears as soon as
+the user looks at the buffer."
+  (let ((live (agent-shell-manager--session-buffers))
+        stale)
+    (dolist (buf live)
+      (let ((was-busy (gethash buf agent-shell-manager--last-busy))
+            (busy (agent-shell-manager--session-busy-p buf))
+            (visible (agent-shell-manager--buffer-visible-p buf)))
+        (when (and was-busy (not busy) (not visible))
+          (puthash buf t agent-shell-manager--unseen-idle))
+        (when visible
+          (remhash buf agent-shell-manager--unseen-idle))
+        (puthash buf busy agent-shell-manager--last-busy)))
+    (maphash (lambda (buf _) (unless (memq buf live) (push buf stale)))
+             agent-shell-manager--last-busy)
+    (dolist (buf stale)
+      (remhash buf agent-shell-manager--last-busy)
+      (remhash buf agent-shell-manager--unseen-idle))))
 
 (defun agent-shell-manager--poll-tick ()
   "Refresh the sidebar if any session's display-relevant state changed."
   (if (not (get-buffer-window agent-shell-manager--buffer-name t))
       (agent-shell-manager--stop-polling)
+    (agent-shell-manager--update-unseen-state)
     (let ((sig (agent-shell-manager--signature)))
       (unless (equal sig agent-shell-manager--last-signature)
         (setq agent-shell-manager--last-signature sig)
@@ -417,6 +471,7 @@ otherwise keep focus in the sidebar."
     (unless sidebar-win
       (user-error "Sidebar is not visible"))
     (setq agent-shell-manager--active-session agent-buffer)
+    (remhash agent-buffer agent-shell-manager--unseen-idle)
     (agent-shell-manager-refresh)
     (agent-shell-manager--point-to-session agent-buffer)
     ;; Collapse everything except the sidebar, then split the main area.
