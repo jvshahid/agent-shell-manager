@@ -463,6 +463,20 @@ If there is an active session, point lands on its row."
       (agent-shell-manager-hide)
     (agent-shell-manager-show)))
 
+(defun agent-shell-manager-switch-to-eshell ()
+  "Switch focus to the eshell buffer of the session at point."
+  (interactive)
+  (let ((agent-buf (agent-shell-manager--current-session)))
+    (unless agent-buf
+      (user-error "No agent session on this line"))
+    (let ((eshell-buf (agent-shell-manager--eshell-for agent-buf)))
+      (unless (buffer-live-p eshell-buf)
+        (user-error "No eshell paired with this session"))
+      ;; Switch to the window displaying the eshell buffer.
+      (if-let ((eshell-win (get-buffer-window eshell-buf)))
+          (select-window eshell-win)
+        (user-error "Eshell window not visible")))))
+
 ;;;; Layout activation
 
 (defun agent-shell-manager--current-session ()
@@ -672,6 +686,7 @@ sessions."
   (define-key map (kbd "R") #'agent-shell-manager-restart-session-pick)
   (define-key map (kbd "k") #'agent-shell-manager-kill-session)
   (define-key map (kbd "g") #'agent-shell-manager-refresh)
+  (define-key map (kbd "e") #'agent-shell-manager-switch-to-eshell)
   (define-key map (kbd "q") #'agent-shell-manager-hide))
 
 ;;;; Hooks into agent-shell lifecycle
