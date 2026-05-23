@@ -464,14 +464,14 @@ If there is an active session, point lands on its row."
     (agent-shell-manager-show)))
 
 (defun agent-shell-manager-switch-to-eshell ()
-  "Switch focus to the eshell buffer of the session at point."
+  "Switch focus to the eshell buffer, activating layout if needed."
   (interactive)
   (let ((agent-buf (agent-shell-manager--current-session)))
     (unless agent-buf
       (user-error "No agent session on this line"))
+    ;; Activate the session layout so both buffers are visible.
+    (agent-shell-manager--activate agent-buf nil)
     (let ((eshell-buf (agent-shell-manager--eshell-for agent-buf)))
-      (unless (buffer-live-p eshell-buf)
-        (user-error "No eshell paired with this session"))
       ;; Switch to the window displaying the eshell buffer.
       (if-let ((eshell-win (get-buffer-window eshell-buf)))
           (select-window eshell-win)
