@@ -79,20 +79,22 @@ With `use-package`:
 
 Inside the sidebar:
 
-| key   | action                                             |
-|-------|----------------------------------------------------|
-| `n`   | next session and activate                          |
-| `p`   | previous session and activate                      |
-| `C-n` | next row (no activation)                           |
-| `C-p` | previous row (no activation)                       |
-| `RET` | activate and focus the agent buffer                |
-| `c`   | create a new session, prompts for a directory      |
-| `C`   | create a new session and prompt for the provider   |
-| `r`   | restart at point, resuming the same conversation   |
-| `R`   | restart at point, prompting for new or existing    |
-| `k`   | kill the session at point and its paired eshell    |
-| `g`   | refresh                                            |
-| `q`   | hide the sidebar                                   |
+| key   | action                                                                  |
+|-------|-------------------------------------------------------------------------|
+| `n`   | next session and activate                                               |
+| `p`   | previous session and activate                                           |
+| `C-n` | next row (no activation)                                                |
+| `C-p` | previous row (no activation)                                            |
+| `RET` | activate and focus the agent buffer                                     |
+| `e`   | activate and switch to the session's eshell (creates layout if needed)  |
+| `u`   | clear the unseen-idle indicator without switching buffers               |
+| `c`   | create a new session, prompts for a directory                           |
+| `C`   | create a new session and prompt for the provider                        |
+| `r`   | restart at point, resuming the same conversation                        |
+| `R`   | restart at point, prompting for new or existing                         |
+| `k`   | kill the session at point and its paired eshell                         |
+| `g`   | refresh                                                                 |
+| `q`   | hide the sidebar                                                        |
 
 ## Configuration
 
