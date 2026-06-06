@@ -444,6 +444,43 @@
     (let ((kill-buffer-query-functions nil))
       (kill-buffer s1))))
 
+(ert-deftest agent-shell-manager-test/mark-read-clears-unseen-marker ()
+  (agent-shell-manager-test--reset-state)
+  (let ((s1 (agent-shell-manager-test--make-mock-session "*a*" "/tmp/" nil)))
+    (agent-shell-manager-test--with-mock-sessions (list s1)
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (puthash s1 t agent-shell-manager--unseen-idle)
+              (agent-shell-manager-mark-read)
+              (should-not (gethash s1 agent-shell-manager--unseen-idle)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/mark-unread-sets-unseen-marker ()
+  (agent-shell-manager-test--reset-state)
+  (let ((s1 (agent-shell-manager-test--make-mock-session "*a*" "/tmp/" nil)))
+    (agent-shell-manager-test--with-mock-sessions (list s1)
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (agent-shell-manager-mark-unread)
+              (should (gethash s1 agent-shell-manager--unseen-idle)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/r-key-marks-read ()
+  (should (eq (lookup-key agent-shell-manager-mode-map (kbd "r"))
+              #'agent-shell-manager-mark-read)))
+
+(ert-deftest agent-shell-manager-test/u-key-marks-unread ()
+  (should (eq (lookup-key agent-shell-manager-mode-map (kbd "u"))
+              #'agent-shell-manager-mark-unread)))
+
 ;;;; Sidebar buffer
 
 (ert-deftest agent-shell-manager-test/get-or-create-buffer-uses-mode ()

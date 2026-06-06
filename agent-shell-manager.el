@@ -477,14 +477,24 @@ If there is an active session, point lands on its row."
           (select-window eshell-win)
         (user-error "Eshell window not visible")))))
 
-(defun agent-shell-manager-clear-unseen-marker ()
-  "Clear the unseen-idle indicator for the session at point.
-Unlike visiting the buffer, this does not switch focus."
+(defun agent-shell-manager-mark-read ()
+  "Mark the session at point as read.
+This clears the unseen-idle indicator without switching focus."
   (interactive)
   (let ((agent-buf (agent-shell-manager--current-session)))
     (unless agent-buf
       (user-error "No agent session on this line"))
     (remhash agent-buf agent-shell-manager--unseen-idle)
+    (agent-shell-manager-refresh)))
+
+(defun agent-shell-manager-mark-unread ()
+  "Mark the session at point as unread.
+This applies the unseen-idle indicator without switching focus."
+  (interactive)
+  (let ((agent-buf (agent-shell-manager--current-session)))
+    (unless agent-buf
+      (user-error "No agent session on this line"))
+    (puthash agent-buf t agent-shell-manager--unseen-idle)
     (agent-shell-manager-refresh)))
 
 ;;;; Layout activation
@@ -692,12 +702,12 @@ sessions."
   (define-key map (kbd "RET") #'agent-shell-manager-visit)
   (define-key map (kbd "c") #'agent-shell-manager-new-session)
   (define-key map (kbd "C") #'agent-shell-manager-new-session-pick-config)
-  (define-key map (kbd "r") #'agent-shell-manager-restart-session)
+  (define-key map (kbd "r") #'agent-shell-manager-mark-read)
   (define-key map (kbd "R") #'agent-shell-manager-restart-session-pick)
   (define-key map (kbd "k") #'agent-shell-manager-kill-session)
   (define-key map (kbd "g") #'agent-shell-manager-refresh)
   (define-key map (kbd "e") #'agent-shell-manager-switch-to-eshell)
-  (define-key map (kbd "u") #'agent-shell-manager-clear-unseen-marker)
+  (define-key map (kbd "u") #'agent-shell-manager-mark-unread)
   (define-key map (kbd "q") #'agent-shell-manager-hide))
 
 ;;;; Hooks into agent-shell lifecycle
