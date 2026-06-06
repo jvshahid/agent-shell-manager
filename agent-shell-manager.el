@@ -9,8 +9,9 @@
 
 ;; A side-window panel that lists open `agent-shell' sessions and lets the
 ;; user switch between them quickly.  Selecting a session arranges the frame
-;; so that the chosen agent buffer is on the top-right and a paired eshell
-;; buffer is on the bottom-right.
+;; so that the chosen agent buffer is above a paired eshell.  An optional
+;; right-hand coding pane can be toggled per session and remembers its window
+;; layout.
 
 ;;; Code:
 
@@ -19,9 +20,11 @@
 (require 'map)
 (require 'tabulated-list)
 (require 'eshell)
+(require 'project)
 
 (declare-function agent-shell-buffers "agent-shell")
 (declare-function agent-shell-new-shell "agent-shell")
+(declare-function agent-shell--start "agent-shell" (&rest args))
 (defvar agent-shell-preferred-agent-config)
 
 ;;;; Customization
@@ -52,6 +55,24 @@ taken as a fraction of the selected frame's width."
   "When non-nil, prompt for confirmation before killing a session via `k'."
   :type 'boolean
   :group 'agent-shell-manager)
+
+(defcustom agent-shell-manager-coding-pane-width 0.5
+  "Width of the optional coding pane.
+An integer is taken as a number of columns.  A float between 0 and 1 is
+taken as a fraction of the non-sidebar area managed by
+`agent-shell-manager'."
+  :type '(choice (integer :tag "Columns")
+                 (float :tag "Fraction of managed area width"))
+  :group 'agent-shell-manager)
+
+(defun agent-shell-manager--resolved-coding-width (window)
+  "Return the coding pane width in columns, resolving fractions against WINDOW."
+  (let ((w agent-shell-manager-coding-pane-width))
+    (cond
+     ((integerp w) w)
+     ((and (floatp w) (> w 0) (< w 1))
+      (max window-min-width (floor (* w (window-total-width window)))))
+     (t (user-error "Invalid `agent-shell-manager-coding-pane-width': %S" w)))))
 
 (defcustom agent-shell-manager-busy-indicator "●"
   "Glyph shown for sessions that are currently busy."
@@ -181,6 +202,12 @@ through the manager.")
 Used by `agent-shell-manager--update-unseen-state' to detect busy→idle
 transitions across poll ticks.")
 
+(defvar agent-shell-manager--coding-pane-visible nil
+  "Non-nil when the optional coding pane should be shown.")
+
+(defvar agent-shell-manager--coding-layout-by-agent (make-hash-table :test 'eq)
+  "Map from agent-shell buffer to saved coding pane window state.")
+
 (defun agent-shell-manager--eshell-buffer-name (agent-buffer)
   "Return the eshell buffer name paired with AGENT-BUFFER."
   (format "*eshell: %s*" (agent-shell-manager--session-name agent-buffer)))
@@ -221,6 +248,7 @@ transitions across poll ticks.")
   (agent-shell-manager--forget-eshell (current-buffer))
   (remhash (current-buffer) agent-shell-manager--unseen-idle)
   (remhash (current-buffer) agent-shell-manager--last-busy)
+  (remhash (current-buffer) agent-shell-manager--coding-layout-by-agent)
   (when (get-buffer agent-shell-manager--buffer-name)
     (run-at-time 0 nil #'agent-shell-manager-refresh)))
 
@@ -497,6 +525,21 @@ This applies the unseen-idle indicator without switching focus."
     (puthash agent-buf t agent-shell-manager--unseen-idle)
     (agent-shell-manager-refresh)))
 
+(defun agent-shell-manager-toggle-coding-pane ()
+  "Toggle the right-hand coding pane for the session at point.
+When invoked outside the sidebar, use the active session.  When shown,
+focus moves to the coding pane.  Its layout is remembered per agent
+session, including splits and visited buffers."
+  (interactive)
+  (let ((agent-buf (agent-shell-manager--current-or-active-session)))
+    (if agent-shell-manager--coding-pane-visible
+        (progn
+          (agent-shell-manager--save-coding-layout agent-shell-manager--active-session)
+          (setq agent-shell-manager--coding-pane-visible nil)
+          (agent-shell-manager--activate agent-buf nil))
+      (setq agent-shell-manager--coding-pane-visible t)
+      (agent-shell-manager--activate agent-buf nil t))))
+
 ;;;; Layout activation
 
 (defun agent-shell-manager--current-session ()
@@ -506,26 +549,137 @@ This applies the unseen-idle indicator without switching focus."
       (user-error "No agent session on this line"))
     buf))
 
-(defun agent-shell-manager--activate (agent-buffer &optional focus-agent)
+(defun agent-shell-manager--current-or-active-session ()
+  "Return the session at point, falling back to the active session."
+  (or (and (derived-mode-p 'agent-shell-manager-mode)
+           (let ((buf (tabulated-list-get-id)))
+             (and (buffer-live-p buf) buf)))
+      (and (buffer-live-p agent-shell-manager--active-session)
+           agent-shell-manager--active-session)
+      (user-error "No agent session available")))
+
+(defun agent-shell-manager--project-directory (agent-buffer)
+  "Return the project root for AGENT-BUFFER, or its session directory."
+  (let ((default-directory (agent-shell-manager--session-cwd agent-buffer)))
+    (if-let ((project (project-current nil)))
+        (expand-file-name (project-root project))
+      default-directory)))
+
+(defun agent-shell-manager--coding-default-buffer (agent-buffer)
+  "Return the default buffer for AGENT-BUFFER's coding pane."
+  (dired-noselect (agent-shell-manager--project-directory agent-buffer)))
+
+(defun agent-shell-manager--coding-pane-window ()
+  "Return the live or internal window for the visible coding pane, or nil.
+The managed coding pane is the rightmost subtree spanning the full height
+of the non-minibuffer frame area to the right of the sidebar."
+  (when-let ((sidebar-win (agent-shell-manager--sidebar-window)))
+    (let* ((sidebar-right (nth 2 (window-edges sidebar-win)))
+           (root-edges (window-edges (frame-root-window)))
+           (root-top (nth 1 root-edges))
+           (root-right (nth 2 root-edges))
+           (root-bottom (nth 3 root-edges))
+           candidates)
+      (walk-window-tree
+       (lambda (win)
+         (let ((edges (window-edges win)))
+           (when (and (> (nth 0 edges) sidebar-right)
+                      (= (nth 1 edges) root-top)
+                      (= (nth 2 edges) root-right)
+                      (= (nth 3 edges) root-bottom))
+             (push win candidates))))
+       nil t 'no-minibuf)
+      ;; Prefer the rightmost matching subtree if more than one exists.
+      (car (sort candidates
+                 (lambda (a b)
+                   (> (nth 0 (window-edges a))
+                      (nth 0 (window-edges b)))))))))
+
+(defun agent-shell-manager--save-coding-layout (&optional agent-buffer)
+  "Save AGENT-BUFFER's current coding pane layout, if it is visible."
+  (let ((agent-buffer (or agent-buffer agent-shell-manager--active-session)))
+    (when (and agent-shell-manager--coding-pane-visible
+               (buffer-live-p agent-buffer))
+      (when-let ((coding-win (agent-shell-manager--coding-pane-window)))
+        (puthash agent-buffer
+                 (window-state-get coding-win)
+                 agent-shell-manager--coding-layout-by-agent)))))
+
+(defun agent-shell-manager--restore-coding-layout (agent-buffer window)
+  "Restore AGENT-BUFFER's saved coding layout into WINDOW.
+If no saved layout exists, show a dired buffer for the session's project
+root.  If restoration fails because a saved buffer disappeared, fall back
+to the default dired buffer."
+  (let ((state (gethash agent-buffer agent-shell-manager--coding-layout-by-agent)))
+    (if state
+        (condition-case nil
+            (window-state-put state window 'safe)
+          (error
+           (set-window-buffer
+            window (agent-shell-manager--coding-default-buffer agent-buffer))))
+      (set-window-buffer
+       window (agent-shell-manager--coding-default-buffer agent-buffer)))))
+
+(defun agent-shell-manager--window-within-p (window container)
+  "Return non-nil if WINDOW's edges are within CONTAINER's edges."
+  (let ((win-edges (window-edges window))
+        (container-edges (window-edges container)))
+    (and (>= (nth 0 win-edges) (nth 0 container-edges))
+         (>= (nth 1 win-edges) (nth 1 container-edges))
+         (<= (nth 2 win-edges) (nth 2 container-edges))
+         (<= (nth 3 win-edges) (nth 3 container-edges)))))
+
+(defun agent-shell-manager--select-coding-pane ()
+  "Select a live window inside the coding pane, if one is visible."
+  (when-let ((coding-root (agent-shell-manager--coding-pane-window)))
+    (cond
+     ((window-live-p coding-root)
+      (select-window coding-root))
+     ((agent-shell-manager--window-within-p (selected-window) coding-root)
+      (select-window (selected-window)))
+     (t
+      (catch 'selected
+        (walk-window-tree
+         (lambda (win)
+           (when (agent-shell-manager--window-within-p win coding-root)
+             (select-window win)
+             (throw 'selected win)))
+         nil nil 'no-minibuf))))))
+
+(defun agent-shell-manager--activate (agent-buffer &optional focus-agent focus-coding)
   "Lay out the frame around AGENT-BUFFER.
 Sidebar stays on the left; AGENT-BUFFER goes top-right; its paired eshell
-goes bottom-right.  When FOCUS-AGENT is non-nil, select the agent window;
-otherwise keep focus in the sidebar."
+goes bottom-right.  When `agent-shell-manager--coding-pane-visible' is
+non-nil, a coding pane is restored to their right.  When FOCUS-AGENT is
+non-nil, select the agent window.  When FOCUS-CODING is non-nil, select a
+coding pane window.  Otherwise keep focus in the sidebar."
   (let* ((sidebar-win (agent-shell-manager--sidebar-window))
          (eshell-buf (agent-shell-manager--eshell-for agent-buffer)))
     (unless sidebar-win
       (user-error "Sidebar is not visible"))
+    (agent-shell-manager--save-coding-layout agent-shell-manager--active-session)
     (setq agent-shell-manager--active-session agent-buffer)
     (agent-shell-manager-refresh)
     (agent-shell-manager--point-to-session agent-buffer)
     ;; Collapse everything except the sidebar, then split the main area.
-    (let ((main-win (next-window sidebar-win nil 'visible)))
+    (let ((main-win (next-window sidebar-win nil 'visible))
+          coding-win)
       (select-window main-win)
       (delete-other-windows main-win)
+      (when agent-shell-manager--coding-pane-visible
+        (setq coding-win
+              (split-window main-win
+                            (- (agent-shell-manager--resolved-coding-width
+                                main-win))
+                            'right)))
       (set-window-buffer main-win agent-buffer)
       (let ((bottom (split-window main-win nil 'below)))
         (set-window-buffer bottom eshell-buf))
-      (cond (focus-agent
+      (when coding-win
+        (agent-shell-manager--restore-coding-layout agent-buffer coding-win))
+      (cond (focus-coding
+             (agent-shell-manager--select-coding-pane))
+            (focus-agent
              (select-window main-win)
              ;; Focusing the agent counts as the user interacting with it;
              ;; drop the unseen marker immediately rather than waiting for
@@ -601,14 +755,16 @@ shell continues the same conversation.  When SESSION-STRATEGY is
 non-nil, override the new shell's `agent-shell-session-strategy'.
 
 The new buffer is spliced into the sidebar at the position the old
-buffer occupied, and the paired eshell (if any) is carried over so
-scrollback and working directory survive the restart."
+buffer occupied.  The paired eshell and coding layout (if any) are
+carried over so scrollback, working directory, and coding context survive
+the restart."
   (let* ((old-agent (agent-shell-manager--current-session))
          (config (agent-shell-manager--session-config old-agent))
          (session-id (and resume (agent-shell-manager--session-id old-agent)))
          (directory (agent-shell-manager--session-cwd old-agent))
          (index (cl-position old-agent agent-shell-manager--display-order))
          (eshell-buf (gethash old-agent agent-shell-manager--eshell-by-agent))
+         (coding-layout nil)
          (was-active (eq old-agent agent-shell-manager--active-session))
          ;; Snapshot windows showing the old buffer before kill-buffer
          ;; evicts it and Emacs substitutes some unrelated replacement.
@@ -624,11 +780,17 @@ scrollback and working directory survive the restart."
     (when (and agent-shell-manager-confirm-kill
                (not (yes-or-no-p prompt)))
       (user-error "Cancelled"))
+    ;; Preserve the coding pane layout in case it is currently visible and
+    ;; about to be disrupted by killing/recreating the agent buffer.
+    (agent-shell-manager--save-coding-layout old-agent)
+    (setq coding-layout
+          (gethash old-agent agent-shell-manager--coding-layout-by-agent))
     ;; Detach the paired eshell so the agent buffer's kill-buffer-hook
     ;; (which would otherwise kill it) leaves it alone.  We re-attach
     ;; once the replacement buffer exists.
     (when eshell-buf
       (remhash old-agent agent-shell-manager--eshell-by-agent))
+    (remhash old-agent agent-shell-manager--coding-layout-by-agent)
     (let ((kill-buffer-query-functions nil))
       (kill-buffer old-agent))
     (let* ((before (agent-shell-manager--session-buffers))
@@ -644,6 +806,8 @@ scrollback and working directory survive the restart."
       (when (and new-buf (buffer-live-p new-buf))
         (when (and eshell-buf (buffer-live-p eshell-buf))
           (puthash new-buf eshell-buf agent-shell-manager--eshell-by-agent))
+        (when coding-layout
+          (puthash new-buf coding-layout agent-shell-manager--coding-layout-by-agent))
         (when index
           (setq agent-shell-manager--display-order
                 (cl-remove new-buf agent-shell-manager--display-order))
@@ -688,6 +852,7 @@ sessions."
     (when (or (not agent-shell-manager-confirm-kill)
               (yes-or-no-p (format "Kill agent session %s? " name)))
       (agent-shell-manager--forget-eshell agent)
+      (remhash agent agent-shell-manager--coding-layout-by-agent)
       (when (eq agent agent-shell-manager--active-session)
         (setq agent-shell-manager--active-session nil))
       (let ((kill-buffer-query-functions nil))
@@ -700,6 +865,7 @@ sessions."
   (define-key map (kbd "C-n") #'next-line)
   (define-key map (kbd "C-p") #'previous-line)
   (define-key map (kbd "RET") #'agent-shell-manager-visit)
+  (define-key map (kbd "TAB") #'agent-shell-manager-toggle-coding-pane)
   (define-key map (kbd "c") #'agent-shell-manager-new-session)
   (define-key map (kbd "C") #'agent-shell-manager-new-session-pick-config)
   (define-key map (kbd "r") #'agent-shell-manager-mark-read)

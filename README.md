@@ -33,9 +33,25 @@ as:
 +-----+--------------------------------+
 ```
 
+Press `TAB` to toggle an optional right-hand coding pane:
+
+```
++-----+-------------------+------------+
+|  s  |    agent-shell    |            |
+|  i  |                   |            |
+|  d  +-------------------+   coding   |
+|  e  |      eshell       |            |
+|  b  |                   |            |
+|  a  |                   |            |
+|  r  |                   |            |
++-----+-------------------+------------+
+```
+
 Each session has its own paired eshell, lazily created and rooted at
 the agent's working directory. The pairing is automatic — switching to
-another session switches to that session's eshell.
+another session switches to that session's eshell.  The coding pane is
+also remembered per session, including its visited buffers and splits;
+when first opened, it shows dired for the session's project root.
 
 A `▶` marker shows the currently active session; `●` shows sessions
 that are mid-request (driven by `agent-shell`'s heartbeat events, so it
@@ -86,6 +102,7 @@ Inside the sidebar:
 | `C-n` | next row (no activation)                                                |
 | `C-p` | previous row (no activation)                                            |
 | `RET` | activate and focus the agent buffer                                     |
+| `TAB` | toggle the coding pane and focus it when shown                          |
 | `e`   | activate and switch to the session's eshell (creates layout if needed)  |
 | `r`   | mark the session read without switching buffers                         |
 | `u`   | mark the session unread without switching buffers                       |
@@ -104,6 +121,10 @@ Inside the sidebar:
 
 ;; Confirm before killing a session.
 (setq agent-shell-manager-confirm-kill t)
+
+;; Coding pane width: integer (columns) or float (0–1, fraction of the
+;; non-sidebar managed area).
+(setq agent-shell-manager-coding-pane-width 0.5)
 
 ;; Indicators.
 (setq agent-shell-manager-active-indicator "▶")

@@ -481,6 +481,143 @@
   (should (eq (lookup-key agent-shell-manager-mode-map (kbd "u"))
               #'agent-shell-manager-mark-unread)))
 
+(ert-deftest agent-shell-manager-test/tab-key-toggles-coding-pane ()
+  (should (eq (lookup-key agent-shell-manager-mode-map (kbd "TAB"))
+              #'agent-shell-manager-toggle-coding-pane)))
+
+;;;; Coding pane
+
+(defun agent-shell-manager-test--coding-pane-buffers ()
+  "Return live buffers displayed inside the current coding pane."
+  (let ((root (agent-shell-manager--coding-pane-window))
+        buffers)
+    (when root
+      (walk-window-tree
+       (lambda (win)
+         (when (agent-shell-manager--window-within-p win root)
+           (push (window-buffer win) buffers)))
+       nil nil 'no-minibuf))
+    buffers))
+
+(ert-deftest agent-shell-manager-test/toggle-coding-pane-shows-dired-and-focuses-it ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((dir (file-name-as-directory
+               (make-temp-file "agent-shell-manager-coding" t)))
+         (s1 (agent-shell-manager-test--make-mock-session "*a*" dir))
+         (saved-config (current-window-configuration)))
+    (unwind-protect
+        (agent-shell-manager-test--with-mock-sessions (list s1)
+          (unwind-protect
+              (let* ((sidebar-buf (agent-shell-manager--get-or-create-buffer))
+                     (sidebar-win (agent-shell-manager--display-sidebar sidebar-buf)))
+                (with-current-buffer sidebar-buf
+                  (tabulated-list-print t)
+                  (goto-char (point-min)))
+                (select-window sidebar-win)
+                (agent-shell-manager-toggle-coding-pane)
+                (should agent-shell-manager--coding-pane-visible)
+                (should (agent-shell-manager--coding-pane-window))
+                (should (agent-shell-manager--window-within-p
+                         (selected-window)
+                         (agent-shell-manager--coding-pane-window)))
+                (with-current-buffer (window-buffer (selected-window))
+                  (should (derived-mode-p 'dired-mode))
+                  (should (equal default-directory dir))))
+            (set-window-configuration saved-config)
+            (when-let ((buf (get-buffer agent-shell-manager--buffer-name)))
+              (let ((kill-buffer-query-functions nil))
+                (kill-buffer buf)))))
+      (agent-shell-manager-test--reset-state)
+      (delete-directory dir t))))
+
+(ert-deftest agent-shell-manager-test/toggle-coding-pane-restores-split-layout ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((dir (file-name-as-directory
+               (make-temp-file "agent-shell-manager-coding" t)))
+         (s1 (agent-shell-manager-test--make-mock-session "*a*" dir))
+         (file-a (generate-new-buffer "file-a.el"))
+         (file-b (generate-new-buffer "file-b.el"))
+         (saved-config (current-window-configuration)))
+    (unwind-protect
+        (agent-shell-manager-test--with-mock-sessions (list s1)
+          (unwind-protect
+              (let* ((sidebar-buf (agent-shell-manager--get-or-create-buffer))
+                     (sidebar-win (agent-shell-manager--display-sidebar sidebar-buf)))
+                (with-current-buffer sidebar-buf
+                  (tabulated-list-print t)
+                  (goto-char (point-min)))
+                (select-window sidebar-win)
+                (agent-shell-manager-toggle-coding-pane)
+                (set-window-buffer (selected-window) file-a)
+                (let ((second (split-window (selected-window) nil 'below)))
+                  (set-window-buffer second file-b))
+                ;; Toggle off, then on again.  The coding pane split should
+                ;; be restored instead of falling back to dired.
+                (select-window sidebar-win)
+                (agent-shell-manager-toggle-coding-pane)
+                (should-not agent-shell-manager--coding-pane-visible)
+                (should (gethash s1 agent-shell-manager--coding-layout-by-agent))
+                (agent-shell-manager-toggle-coding-pane)
+                (let ((buffers (agent-shell-manager-test--coding-pane-buffers)))
+                  (should (memq file-a buffers))
+                  (should (memq file-b buffers))))
+            (set-window-configuration saved-config)
+            (when-let ((buf (get-buffer agent-shell-manager--buffer-name)))
+              (let ((kill-buffer-query-functions nil))
+                (kill-buffer buf)))))
+      (agent-shell-manager-test--reset-state)
+      (delete-directory dir t)
+      (mapc (lambda (buf)
+              (when (buffer-live-p buf)
+                (kill-buffer buf)))
+            (list file-a file-b)))))
+
+(ert-deftest agent-shell-manager-test/coding-pane-layout-is-per-session ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((dir (file-name-as-directory
+               (make-temp-file "agent-shell-manager-coding" t)))
+         (s1 (agent-shell-manager-test--make-mock-session "*a*" dir))
+         (s2 (agent-shell-manager-test--make-mock-session "*b*" dir))
+         (file-a (generate-new-buffer "session-a.el"))
+         (file-b (generate-new-buffer "session-b.el"))
+         (saved-config (current-window-configuration)))
+    (unwind-protect
+        (agent-shell-manager-test--with-mock-sessions (list s1 s2)
+          (unwind-protect
+              (let* ((sidebar-buf (agent-shell-manager--get-or-create-buffer))
+                     (sidebar-win (agent-shell-manager--display-sidebar sidebar-buf)))
+                (with-current-buffer sidebar-buf
+                  (tabulated-list-print t)
+                  (goto-char (point-min)))
+                (select-window sidebar-win)
+                (agent-shell-manager-toggle-coding-pane)
+                (set-window-buffer (selected-window) file-a)
+                ;; Switch to s2 and give it a different coding buffer.
+                (select-window sidebar-win)
+                (with-current-buffer sidebar-buf
+                  (goto-char (point-min))
+                  (forward-line 1)
+                  (agent-shell-manager--activate (agent-shell-manager--current-session)))
+                (agent-shell-manager--select-coding-pane)
+                (set-window-buffer (selected-window) file-b)
+                ;; Switching back to s1 should restore s1's buffer, not s2's.
+                (select-window sidebar-win)
+                (agent-shell-manager--point-to-session s1)
+                (agent-shell-manager--activate s1)
+                (let ((buffers (agent-shell-manager-test--coding-pane-buffers)))
+                  (should (memq file-a buffers))
+                  (should-not (memq file-b buffers))))
+            (set-window-configuration saved-config)
+            (when-let ((buf (get-buffer agent-shell-manager--buffer-name)))
+              (let ((kill-buffer-query-functions nil))
+                (kill-buffer buf)))))
+      (agent-shell-manager-test--reset-state)
+      (delete-directory dir t)
+      (mapc (lambda (buf)
+              (when (buffer-live-p buf)
+                (kill-buffer buf)))
+            (list file-a file-b)))))
+
 ;;;; Sidebar buffer
 
 (ert-deftest agent-shell-manager-test/get-or-create-buffer-uses-mode ()
@@ -600,6 +737,7 @@
     (agent-shell-manager-test--with-mock-sessions (list s1)
       (let ((eshell-buf (agent-shell-manager--eshell-for s1))
             (buf (agent-shell-manager--get-or-create-buffer)))
+        (puthash s1 'saved-coding-layout agent-shell-manager--coding-layout-by-agent)
         (unwind-protect
             (with-current-buffer buf
               (tabulated-list-print t)
@@ -608,7 +746,8 @@
                 (agent-shell-manager-kill-session))
               (should-not (buffer-live-p s1))
               (should-not (buffer-live-p eshell-buf))
-              (should-not (gethash s1 agent-shell-manager--eshell-by-agent)))
+              (should-not (gethash s1 agent-shell-manager--eshell-by-agent))
+              (should-not (gethash s1 agent-shell-manager--coding-layout-by-agent)))
           (let ((kill-buffer-query-functions nil))
             (kill-buffer buf)))))))
 
@@ -949,6 +1088,29 @@ itself should override the stub locally."
                 (should-not (gethash s1 agent-shell-manager--eshell-by-agent))))
           (agent-shell-manager--forget-eshell
            (car agent-shell-manager--display-order))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/restart-preserves-coding-layout ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((s1 (agent-shell-manager-test--make-restartable-session
+              "*a*" "/tmp/" 'cfg-a "id-a")))
+    (puthash s1 'saved-coding-layout agent-shell-manager--coding-layout-by-agent)
+    (agent-shell-manager-test--with-restart-sessions (list s1)
+        (:captured-args _
+         :new-buffer-fn (lambda ()
+                          (agent-shell-manager-test--make-restartable-session
+                           "*a-new*" "/tmp/" 'cfg-a "id-a")))
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (agent-shell-manager-restart-session)
+              (let ((new (car agent-shell-manager--display-order)))
+                (should (eq 'saved-coding-layout
+                            (gethash new agent-shell-manager--coding-layout-by-agent)))
+                (should-not (gethash s1 agent-shell-manager--coding-layout-by-agent))))
           (let ((kill-buffer-query-functions nil))
             (kill-buffer buf)))))))
 
