@@ -50,6 +50,7 @@ exit."
   (clrhash agent-shell-manager--unseen-idle)
   (clrhash agent-shell-manager--last-busy)
   (clrhash agent-shell-manager--coding-layout-by-agent)
+  (clrhash agent-shell-manager--coding-pane-visible-by-frame)
   (setq agent-shell-manager--display-order nil)
   (setq agent-shell-manager--active-session nil)
   (setq agent-shell-manager--coding-pane-visible nil))

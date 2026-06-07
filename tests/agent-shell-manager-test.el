@@ -530,6 +530,39 @@
       (agent-shell-manager-test--reset-state)
       (delete-directory dir t))))
 
+(ert-deftest agent-shell-manager-test/toggle-coding-pane-recovers-from-stale-visible-state ()
+  (agent-shell-manager-test--reset-state)
+  (let* ((dir (file-name-as-directory
+               (make-temp-file "agent-shell-manager-coding" t)))
+         (s1 (agent-shell-manager-test--make-mock-session "*a*" dir))
+         (saved-config (current-window-configuration)))
+    (unwind-protect
+        (agent-shell-manager-test--with-mock-sessions (list s1)
+          (unwind-protect
+              (let* ((sidebar-buf (agent-shell-manager--get-or-create-buffer))
+                     (sidebar-win (agent-shell-manager--display-sidebar sidebar-buf)))
+                (with-current-buffer sidebar-buf
+                  (tabulated-list-print t)
+                  (goto-char (point-min)))
+                (select-window sidebar-win)
+                ;; Reproduce a desync where the flag says the coding pane is
+                ;; visible but the frame no longer contains that pane.
+                (agent-shell-manager--activate s1)
+                (agent-shell-manager--set-coding-pane-visible t)
+                (should-not (agent-shell-manager--coding-pane-window))
+                (agent-shell-manager-toggle-coding-pane)
+                (should (agent-shell-manager--coding-pane-visible-p))
+                (should (agent-shell-manager--coding-pane-window))
+                (should (agent-shell-manager--window-within-p
+                         (selected-window)
+                         (agent-shell-manager--coding-pane-window))))
+            (set-window-configuration saved-config)
+            (when-let ((buf (get-buffer agent-shell-manager--buffer-name)))
+              (let ((kill-buffer-query-functions nil))
+                (kill-buffer buf)))))
+      (agent-shell-manager-test--reset-state)
+      (delete-directory dir t))))
+
 (ert-deftest agent-shell-manager-test/toggle-coding-pane-restores-split-layout ()
   (agent-shell-manager-test--reset-state)
   (let* ((dir (file-name-as-directory

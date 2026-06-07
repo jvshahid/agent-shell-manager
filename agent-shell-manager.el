@@ -203,7 +203,14 @@ Used by `agent-shell-manager--update-unseen-state' to detect busy→idle
 transitions across poll ticks.")
 
 (defvar agent-shell-manager--coding-pane-visible nil
-  "Non-nil when the optional coding pane should be shown.")
+  "Non-nil when the optional coding pane should be shown in the selected frame.
+Mirrors `agent-shell-manager--coding-pane-visible-by-frame' for
+compatibility with ad-hoc debugging/evaluation.")
+
+(defvar agent-shell-manager--coding-pane-visible-by-frame (make-hash-table :test 'eq)
+  "Map from frame to whether that frame's coding pane should be shown.
+The manager can be visible in multiple emacsclient frames connected to
+the same daemon; coding pane visibility is frame-local window state.")
 
 (defvar agent-shell-manager--coding-layout-by-agent (make-hash-table :test 'eq)
   "Map from agent-shell buffer to saved coding pane window state.")
@@ -326,7 +333,7 @@ and would otherwise snap the visible cursor to the top of the sidebar."
   (interactive)
   (when-let ((buf (get-buffer agent-shell-manager--buffer-name)))
     (with-current-buffer buf
-      (let* ((win (get-buffer-window buf t))
+      (let* ((win (get-buffer-window buf (selected-frame)))
              (saved (save-excursion
                       (when win (goto-char (window-point win)))
                       (tabulated-list-get-id))))
@@ -438,7 +445,7 @@ sidebar window is not selected."
       (while (and (not (eobp))
                   (not (eq (tabulated-list-get-id) buffer)))
         (forward-line 1))
-      (when-let ((win (get-buffer-window sb t)))
+      (when-let ((win (get-buffer-window sb (selected-frame))))
         (set-window-point win (point))))))
 
 ;;;; Sidebar window
@@ -454,10 +461,13 @@ sidebar window is not selected."
      (window-parameters . ((no-other-window . nil)
                            (no-delete-other-windows . t))))))
 
-(defun agent-shell-manager--sidebar-window ()
-  "Return the live sidebar window, or nil."
+(defun agent-shell-manager--sidebar-window (&optional frame)
+  "Return the live sidebar window on FRAME, or nil.
+FRAME defaults to the selected frame.  Do not search all frames here:
+when several emacsclient frames share the same daemon, using a sidebar
+from another frame makes layout changes happen in the wrong frame."
   (when-let ((buf (get-buffer agent-shell-manager--buffer-name)))
-    (get-buffer-window buf t)))
+    (get-buffer-window buf (or frame (selected-frame)))))
 
 ;;;###autoload
 (defun agent-shell-manager-show ()
@@ -529,15 +539,26 @@ This applies the unseen-idle indicator without switching focus."
   "Toggle the right-hand coding pane for the session at point.
 When invoked outside the sidebar, use the active session.  When shown,
 focus moves to the coding pane.  Its layout is remembered per agent
-session, including splits and visited buffers."
+session, including splits and visited buffers.
+
+If the internal visibility flag says the pane is visible but the window
+is gone (for example after another command changed the window layout),
+treat the pane as hidden and recreate it instead of requiring two TABs."
   (interactive)
-  (let ((agent-buf (agent-shell-manager--current-or-active-session)))
-    (if agent-shell-manager--coding-pane-visible
+  (let* ((agent-buf (agent-shell-manager--current-or-active-session))
+         (visible (agent-shell-manager--coding-pane-visible-p))
+         (coding-win (agent-shell-manager--coding-pane-window)))
+    (if (and visible coding-win)
         (progn
           (agent-shell-manager--save-coding-layout agent-shell-manager--active-session)
-          (setq agent-shell-manager--coding-pane-visible nil)
+          (agent-shell-manager--set-coding-pane-visible nil)
           (agent-shell-manager--activate agent-buf nil))
-      (setq agent-shell-manager--coding-pane-visible t)
+      ;; If visibility is stale (the flag is set but the pane/window is gone),
+      ;; do not keep reapplying a possibly corrupt saved coding layout.  Fall
+      ;; back to a fresh default pane so one TAB can recover the session.
+      (when visible
+        (remhash agent-buf agent-shell-manager--coding-layout-by-agent))
+      (agent-shell-manager--set-coding-pane-visible t)
       (agent-shell-manager--activate agent-buf nil t))))
 
 ;;;; Layout activation
@@ -569,36 +590,59 @@ session, including splits and visited buffers."
   "Return the default buffer for AGENT-BUFFER's coding pane."
   (dired-noselect (agent-shell-manager--project-directory agent-buffer)))
 
-(defun agent-shell-manager--coding-pane-window ()
-  "Return the live or internal window for the visible coding pane, or nil.
+(defun agent-shell-manager--coding-pane-visible-p (&optional frame)
+  "Return non-nil if FRAME's coding pane should be visible."
+  (gethash (or frame (selected-frame))
+           agent-shell-manager--coding-pane-visible-by-frame))
+
+(defun agent-shell-manager--set-coding-pane-visible (visible &optional frame)
+  "Record whether FRAME's coding pane should be VISIBLE."
+  (let ((frame (or frame (selected-frame))))
+    (if visible
+        (puthash frame t agent-shell-manager--coding-pane-visible-by-frame)
+      (remhash frame agent-shell-manager--coding-pane-visible-by-frame))
+    (when (eq frame (selected-frame))
+      (setq agent-shell-manager--coding-pane-visible visible))))
+
+(defun agent-shell-manager--discover-coding-pane-window (&optional frame)
+  "Discover the coding pane root from FRAME's geometry, or nil.
 The managed coding pane is the rightmost subtree spanning the full height
 of the non-minibuffer frame area to the right of the sidebar."
-  (when-let ((sidebar-win (agent-shell-manager--sidebar-window)))
-    (let* ((sidebar-right (nth 2 (window-edges sidebar-win)))
-           (root-edges (window-edges (frame-root-window)))
+  (let ((frame (or frame (selected-frame))))
+    (when-let ((sidebar-win (agent-shell-manager--sidebar-window frame)))
+      (let* ((sidebar-right (nth 2 (window-edges sidebar-win)))
+           (root-edges (window-edges (frame-root-window frame)))
            (root-top (nth 1 root-edges))
            (root-right (nth 2 root-edges))
            (root-bottom (nth 3 root-edges))
            candidates)
-      (walk-window-tree
-       (lambda (win)
-         (let ((edges (window-edges win)))
-           (when (and (> (nth 0 edges) sidebar-right)
-                      (= (nth 1 edges) root-top)
-                      (= (nth 2 edges) root-right)
-                      (= (nth 3 edges) root-bottom))
-             (push win candidates))))
-       nil t 'no-minibuf)
-      ;; Prefer the rightmost matching subtree if more than one exists.
-      (car (sort candidates
-                 (lambda (a b)
-                   (> (nth 0 (window-edges a))
-                      (nth 0 (window-edges b)))))))))
+        (walk-window-tree
+         (lambda (win)
+           (let ((edges (window-edges win)))
+             (when (and (> (nth 0 edges) sidebar-right)
+                        (= (nth 1 edges) root-top)
+                        (= (nth 2 edges) root-right)
+                        (= (nth 3 edges) root-bottom))
+               (push win candidates))))
+         frame t 'no-minibuf)
+        ;; Prefer the rightmost matching subtree if more than one exists.
+        (car (sort candidates
+                   (lambda (a b)
+                     (> (nth 0 (window-edges a))
+                        (nth 0 (window-edges b))))))))))
+
+(defun agent-shell-manager--coding-pane-window ()
+  "Return the live or internal window for the visible coding pane, or nil.
+Prefer geometry discovery so user-created splits inside the coding pane
+are saved as one pane instead of saving only the originally selected
+leaf window."
+  (when (agent-shell-manager--coding-pane-visible-p)
+    (agent-shell-manager--discover-coding-pane-window)))
 
 (defun agent-shell-manager--save-coding-layout (&optional agent-buffer)
   "Save AGENT-BUFFER's current coding pane layout, if it is visible."
   (let ((agent-buffer (or agent-buffer agent-shell-manager--active-session)))
-    (when (and agent-shell-manager--coding-pane-visible
+    (when (and (agent-shell-manager--coding-pane-visible-p)
                (buffer-live-p agent-buffer))
       (when-let ((coding-win (agent-shell-manager--coding-pane-window)))
         (puthash agent-buffer
@@ -615,19 +659,28 @@ to the default dired buffer."
         (condition-case nil
             (window-state-put state window 'safe)
           (error
-           (set-window-buffer
-            window (agent-shell-manager--coding-default-buffer agent-buffer))))
+           (remhash agent-buffer agent-shell-manager--coding-layout-by-agent)
+           (when (agent-shell-manager--window-valid-p window)
+             (set-window-buffer
+              window (agent-shell-manager--coding-default-buffer agent-buffer)))))
       (set-window-buffer
        window (agent-shell-manager--coding-default-buffer agent-buffer)))))
 
+(defun agent-shell-manager--window-valid-p (window)
+  "Return non-nil if WINDOW is a valid Emacs window object."
+  (and (windowp window)
+       (window-valid-p window)))
+
 (defun agent-shell-manager--window-within-p (window container)
   "Return non-nil if WINDOW's edges are within CONTAINER's edges."
-  (let ((win-edges (window-edges window))
-        (container-edges (window-edges container)))
-    (and (>= (nth 0 win-edges) (nth 0 container-edges))
-         (>= (nth 1 win-edges) (nth 1 container-edges))
-         (<= (nth 2 win-edges) (nth 2 container-edges))
-         (<= (nth 3 win-edges) (nth 3 container-edges)))))
+  (when (and (agent-shell-manager--window-valid-p window)
+             (agent-shell-manager--window-valid-p container))
+    (let ((win-edges (window-edges window))
+          (container-edges (window-edges container)))
+      (and (>= (nth 0 win-edges) (nth 0 container-edges))
+           (>= (nth 1 win-edges) (nth 1 container-edges))
+           (<= (nth 2 win-edges) (nth 2 container-edges))
+           (<= (nth 3 win-edges) (nth 3 container-edges))))))
 
 (defun agent-shell-manager--select-coding-pane ()
   "Select a live window inside the coding pane, if one is visible."
@@ -666,7 +719,7 @@ coding pane window.  Otherwise keep focus in the sidebar."
           coding-win)
       (select-window main-win)
       (delete-other-windows main-win)
-      (when agent-shell-manager--coding-pane-visible
+      (when (agent-shell-manager--coding-pane-visible-p)
         (setq coding-win
               (split-window main-win
                             (- (agent-shell-manager--resolved-coding-width
