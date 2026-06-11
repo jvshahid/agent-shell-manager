@@ -756,6 +756,32 @@ coding pane window.  Otherwise keep focus in the sidebar."
   (forward-line -1)
   (agent-shell-manager--activate (agent-shell-manager--current-session)))
 
+(defun agent-shell-manager--move-current-session (direction)
+  "Move the session at point by DIRECTION rows in the display order.
+A positive DIRECTION moves the session down; a negative DIRECTION moves
+it up.  The session remains selected after the list is refreshed."
+  (let* ((session (agent-shell-manager--current-session))
+         (order (copy-sequence (agent-shell-manager--ordered-buffers)))
+         (index (cl-position session order :test #'eq))
+         (new-index (and index (+ index direction))))
+    (when (and index
+               (>= new-index 0)
+               (< new-index (length order)))
+      (cl-rotatef (nth index order) (nth new-index order))
+      (setq agent-shell-manager--display-order order)
+      (agent-shell-manager-refresh)
+      (agent-shell-manager--point-to-session session))))
+
+(defun agent-shell-manager-move-session-down ()
+  "Move the session at point down one row in the sidebar."
+  (interactive)
+  (agent-shell-manager--move-current-session 1))
+
+(defun agent-shell-manager-move-session-up ()
+  "Move the session at point up one row in the sidebar."
+  (interactive)
+  (agent-shell-manager--move-current-session -1))
+
 (defun agent-shell-manager-visit ()
   "Activate the session at point and focus the agent buffer."
   (interactive)
@@ -915,6 +941,8 @@ sessions."
 (let ((map agent-shell-manager-mode-map))
   (define-key map (kbd "n") #'agent-shell-manager-next)
   (define-key map (kbd "p") #'agent-shell-manager-previous)
+  (define-key map (kbd "N") #'agent-shell-manager-move-session-down)
+  (define-key map (kbd "P") #'agent-shell-manager-move-session-up)
   (define-key map (kbd "C-n") #'next-line)
   (define-key map (kbd "C-p") #'previous-line)
   (define-key map (kbd "RET") #'agent-shell-manager-visit)

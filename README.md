@@ -99,6 +99,8 @@ Inside the sidebar:
 |-------|-------------------------------------------------------------------------|
 | `n`   | next session and activate                                               |
 | `p`   | previous session and activate                                           |
+| `N`   | move session down in the list                                           |
+| `P`   | move session up in the list                                             |
 | `C-n` | next row (no activation)                                                |
 | `C-p` | previous row (no activation)                                            |
 | `RET` | activate and focus the agent buffer                                     |

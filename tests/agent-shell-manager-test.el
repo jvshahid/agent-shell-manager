@@ -263,6 +263,50 @@
                 (kill-buffer b)))
             (list s1 s2 s3)))))
 
+(ert-deftest agent-shell-manager-test/move-session-down-reorders-list ()
+  (agent-shell-manager-test--reset-state)
+  (let ((s1 (agent-shell-manager-test--make-mock-session "*a*" "/tmp/"))
+        (s2 (agent-shell-manager-test--make-mock-session "*b*" "/tmp/"))
+        (s3 (agent-shell-manager-test--make-mock-session "*c*" "/tmp/")))
+    (agent-shell-manager-test--with-mock-sessions (list s1 s2 s3)
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (forward-line 1) ;; on s2
+              (agent-shell-manager-move-session-down)
+              (should (equal agent-shell-manager--display-order
+                             (list s1 s3 s2)))
+              (should (eq (tabulated-list-get-id) s2)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/move-session-up-reorders-list ()
+  (agent-shell-manager-test--reset-state)
+  (let ((s1 (agent-shell-manager-test--make-mock-session "*a*" "/tmp/"))
+        (s2 (agent-shell-manager-test--make-mock-session "*b*" "/tmp/"))
+        (s3 (agent-shell-manager-test--make-mock-session "*c*" "/tmp/")))
+    (agent-shell-manager-test--with-mock-sessions (list s1 s2 s3)
+      (let ((buf (agent-shell-manager--get-or-create-buffer)))
+        (unwind-protect
+            (with-current-buffer buf
+              (tabulated-list-print t)
+              (goto-char (point-min))
+              (forward-line 1) ;; on s2
+              (agent-shell-manager-move-session-up)
+              (should (equal agent-shell-manager--display-order
+                             (list s2 s1 s3)))
+              (should (eq (tabulated-list-get-id) s2)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf)))))))
+
+(ert-deftest agent-shell-manager-test/N-and-P-keys-move-sessions ()
+  (should (eq (lookup-key agent-shell-manager-mode-map (kbd "N"))
+              #'agent-shell-manager-move-session-down))
+  (should (eq (lookup-key agent-shell-manager-mode-map (kbd "P"))
+              #'agent-shell-manager-move-session-up)))
+
 (ert-deftest agent-shell-manager-test/entries-empty-when-no-sessions ()
   (agent-shell-manager-test--reset-state)
   (agent-shell-manager-test--with-mock-sessions nil
